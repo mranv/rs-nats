@@ -1,76 +1,52 @@
-# Remote Support System
+# Remote Support NATS Client/Server
 
-This project provides a remote support system using NATS messaging for reliable communication between a server (support provider) and multiple clients (machines requiring support).
+This code implements a robust remote support tool that allows you to execute commands on client machines from a central server using NATS messaging.
 
-## Features
+## How to Build and Run
 
-- **Reliable Communication:** Utilizes NATS messaging for robust and efficient communication.
-- **Cross-Platform Command Execution:** Executes commands on both Windows and Linux systems with appropriate shell selection.
-- **System Information Gathering:** Collects detailed system information compatible with Windows and Linux.
-- **Client Auto-Registration:** Automatically registers clients with hostname and username detection.
+1. **First, ensure a NATS server is running**:
+   ```bash
+   # Using Docker
+   docker run -p 4222:4222 nats
+   ```
 
-## Prerequisites
+2. **Build the project**:
+   ```bash
+   cargo build --release
+   ```
 
-- [Rust](https://www.rust-lang.org/tools/install) (for building the project)
-- [Docker](https://docs.docker.com/get-docker/) (for running a NATS server)
+3. **Run the server** (on your support machine):
+   ```bash
+   ./target/release/rs-nats server
+   ```
 
-## Building the Project
+4. **Run the client** (on machines to be supported):
+   ```bash
+   ./target/release/rs-nats client
+   ```
 
-To build the project in release mode, run:
+## Server Commands
 
-```bash
-cargo build --release
-```
+Once the server is running, you can use the following commands:
 
-## Setting Up the NATS Server
+- `list` - Shows all connected clients
+- `execute <client_id> <command>` - Run a shell command on a client
+- `sysinfo <client_id>` - Get system information from a client
+- `ping <client_id>` - Check if a client is responsive
+- `exit` - Shut down the server
 
-If you don't have a NATS server running, you can start one using Docker:
+## Expected Behavior
 
-```bash
-docker run -p 4222:4222 nats
-```
+1. The client will keep trying to connect until a server is available
+2. Once connected, you can run commands remotely
+3. You'll see command output in the server console
+4. Even if the server restarts, clients will reconnect automatically
 
-## Running the Server (Support Provider Machine)
+## Troubleshooting
 
-On the support provider's machine, start the server:
+If you don't see command output on the server:
+- Check the logs for both client and server
+- Verify the NATS server is running and accessible
+- Make sure firewalls allow connections on port 4222
 
-```bash
-./target/release/rs-nats server
-```
-
-## Running the Client (Machines Needing Support)
-
-On each client machine that requires support, run:
-
-```bash
-./target/release/rs-nats client
-```
-
-## Server Interactive Console Commands
-
-Once the server is running, you can use the interactive console with the following commands:
-
-- `list`  
-  Show all connected clients.
-
-- `execute <client_id> <command>`  
-  Run a command on a specific client.
-
-- `sysinfo <client_id>`  
-  View detailed system information of a client.
-
-- `ping <client_id>`  
-  Check if a client is responsive.
-
-- `exit`  
-  Shut down the server.
-
-## Implementation Details
-
-- **NATS Messaging:** Ensures reliable communication between the server and clients.
-- **Error Handling:** Provides detailed error handling for command execution.
-- **Cross-Platform Compatibility:** Executes commands using the appropriate shell for Windows and Linux.
-- **System Information:** Gathers comprehensive system information compatible with both Windows and Linux.
-- **Client Auto-Registration:** Clients automatically register upon connection, with detection of hostname and username.
-
-For any questions about implementation details or extending functionality, please reach out. 
+The extra logging we've added should help diagnose any connectivity issues.

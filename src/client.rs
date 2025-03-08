@@ -39,9 +39,9 @@ impl SupportClient {
     pub async fn run(&self) -> Result<()> {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<bool>(1);
         
-        // Register with the server
+        // Register with the server - keep trying indefinitely until successful
         info!("Registering with server as {}", self.client_id);
-        self.register().await?;
+        self.register_with_retry(true).await?;
         
         // Subscribe to commands
         let command_subject = format!("{}.command.{}", self.subject_prefix, self.client_id);
@@ -76,11 +76,24 @@ impl SupportClient {
                             },
                             Command::GetSystemInfo => {
                                 let sys_info = get_system_info();
-                                CommandResult {
-                                    success: true,
-                                    output: format!("{:#?}", sys_info),
-                                    error: None,
-                                    command_type: CommandType::Internal,
+                                // Use serde_json to serialize the system info properly
+                                match to_string(&sys_info) {
+                                    Ok(json) => {
+                                        CommandResult {
+                                            success: true,
+                                            output: json,
+                                            error: None,
+                                            command_type: CommandType::Internal,
+                                        }
+                                    },
+                                    Err(e) => {
+                                        CommandResult {
+                                            success: false,
+                                            output: String::new(),
+                                            error: Some(format!("Failed to serialize system info: {}", e)),
+                                            command_type: CommandType::Internal,
+                                        }
+                                    }
                                 }
                             },
                             Command::Shutdown => {
@@ -114,7 +127,12 @@ impl SupportClient {
                         let response_subject = format!("{}.response.{}", prefix, client_id);
                         match to_string(&result) {
                             Ok(json) => {
-                                let _ = nats.publish(response_subject, json.into()).await;
+                                info!("Sending response to {}: {}", response_subject, json);
+                                let send_result = nats.publish(response_subject, json.into()).await;
+                                match send_result {
+                                    Ok(_) => info!("Successfully sent response"),
+                                    Err(e) => error!("Failed to send response: {}", e),
+                                }
                             },
                             Err(e) => {
                                 error!("Failed to serialize result: {}", e);
@@ -150,22 +168,90 @@ impl SupportClient {
         Ok(())
     }
     
+    // Modified to run indefinitely if needed
+    async fn register_with_retry(&self, run_indefinitely: bool) -> Result<()> {
+        let mut attempts = 0;
+        let initial_backoff = Duration::from_secs(2);
+        let max_backoff = Duration::from_secs(60); // Cap at 1 minute between retries
+        let mut current_backoff = initial_backoff;
+        
+        loop {
+            attempts += 1;
+            
+            match self.register().await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    // Just check error message for "no responders" string
+                    let error_msg = e.to_string();
+                    let is_no_responders = error_msg.contains("no responders");
+                    
+                    if is_no_responders {
+                        warn!("No server ready yet, retrying in {:?} (attempt {})", 
+                            current_backoff, attempts);
+                        sleep(current_backoff).await;
+                        
+                        // Increase backoff for next attempt (exponential backoff)
+                        // but cap at max_backoff
+                        current_backoff = std::cmp::min(
+                            Duration::from_secs_f32(current_backoff.as_secs_f32() * 1.5),
+                            max_backoff
+                        );
+                        
+                        // Keep trying indefinitely if specified
+                        if run_indefinitely {
+                            continue;
+                        }
+                        
+                        // Otherwise give up after 10 attempts
+                        if attempts >= 10 {
+                            return Err(anyhow::anyhow!("Failed to register after {} attempts: {}", attempts, e));
+                        }
+                    } else {
+                        // If it's some other error, don't retry
+                        return Err(anyhow::anyhow!("Registration failed: {}", e));
+                    }
+                }
+            }
+        }
+    }
+    
     async fn register(&self) -> Result<()> {
         let register_subject = format!("{}.register", self.subject_prefix);
         let system_info = get_system_info();
         
         match to_string(&system_info) {
             Ok(json) => {
-                let resp = self.nats_client.request(register_subject, json.into()).await?;
-                let resp_data = String::from_utf8_lossy(&resp.payload);
+                // Create headers with client_id
+                let mut headers = async_nats::HeaderMap::new();
+                headers.insert("client_id", self.client_id.as_str());
                 
-                if resp_data == "ACK" {
-                    info!("Successfully registered with server");
-                } else {
-                    warn!("Unexpected registration response: {}", resp_data);
+                // Use request_with_headers with timeout
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    self.nats_client.request_with_headers(
+                        register_subject, 
+                        headers,
+                        json.into()
+                    )
+                ).await {
+                    Ok(resp_result) => {
+                        match resp_result {
+                            Ok(resp) => {
+                                let resp_data = String::from_utf8_lossy(&resp.payload);
+                                
+                                if resp_data == "ACK" {
+                                    info!("Successfully registered with server");
+                                } else {
+                                    warn!("Unexpected registration response: {}", resp_data);
+                                }
+                                
+                                Ok(())
+                            },
+                            Err(e) => Err(anyhow::anyhow!("Registration request failed: {}", e))
+                        }
+                    },
+                    Err(_) => Err(anyhow::anyhow!("Registration request timed out"))
                 }
-                
-                Ok(())
             },
             Err(e) => {
                 Err(RsNatsError::SerializationError(format!("Failed to serialize system info: {}", e)).into())

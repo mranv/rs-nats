@@ -1,12 +1,13 @@
 use rs_nats_lib::{Command, CommandResult, DEFAULT_NATS_URL, DEFAULT_SUBJECT_PREFIX, RsNatsError, SystemInfo};
 use anyhow::Result;
 use async_nats::Client;
-use log::{info, warn};
+use log::{error, info, warn};
 use futures_util::stream::StreamExt;
 use serde_json::{from_slice, to_string};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
+use tokio::time::Duration;
 
 pub struct Server {
     nats_client: Client,
@@ -50,7 +51,17 @@ impl Server {
             while let Some(msg) = reg_stream.next().await {
                 match from_slice::<SystemInfo>(&msg.payload) {
                     Ok(system_info) => {
-                        let client_id = msg.reply.clone().unwrap_or_default();
+                        // Get client ID from header if available, otherwise use inbox ID
+                        let client_id = match &msg.headers {
+                            Some(headers) => {
+                                if let Some(values) = headers.get("client_id") {
+                                    values.to_string()
+                                } else {
+                                    msg.reply.clone().unwrap_or_default()
+                                }
+                            },
+                            None => msg.reply.clone().unwrap_or_default()
+                        };
                         
                         info!("New client connected: {} ({})", client_id, system_info.hostname);
                         
@@ -67,30 +78,46 @@ impl Server {
                         
                         // Subscribe to client response channel
                         let response_subject = format!("{}.response.{}", prefix, client_id);
-                        let response_subscription = nats.subscribe(response_subject).await.unwrap();
+                        info!("Subscribing to responses on {}", response_subject);
                         
-                        // Handle responses from this specific client
-                        tokio::spawn(async move {
-                            let mut resp_stream = response_subscription;
-                            while let Some(response_msg) = resp_stream.next().await {
-                                match from_slice::<CommandResult>(&response_msg.payload) {
-                                    Ok(result) => {
-                                        info!("Received response from {}: {}", client_id, 
-                                            if result.success { "Success" } else { "Failed" });
+                        match nats.subscribe(response_subject).await {
+                            Ok(subscription) => {
+                                let client_id_clone = client_id.clone();
+                                tokio::spawn(async move {
+                                    let mut msg_stream = subscription;
+                                    info!("Response handler started for {}", client_id_clone);
+                                    
+                                    while let Some(msg) = msg_stream.next().await {
+                                        let payload_str = String::from_utf8_lossy(&msg.payload);
+                                        info!("Response received from {}: {}", client_id_clone, payload_str);
                                         
-                                        println!("\nClient: {}", client_id);
-                                        println!("Command result: {}", if result.success { "Success" } else { "Failed" });
-                                        println!("Output:\n{}", result.output);
-                                        if let Some(err) = result.error {
-                                            println!("Error: {}", err);
+                                        match from_slice::<CommandResult>(&msg.payload) {
+                                            Ok(result) => {
+                                                println!("\n----- COMMAND RESULT -----");
+                                                println!("Client: {}", client_id_clone);
+                                                println!("Status: {}", if result.success { "Success" } else { "Failed" });
+                                                println!("Output:\n{}", result.output);
+                                                if let Some(err) = result.error {
+                                                    println!("Error: {}", err);
+                                                }
+                                                println!("--------------------------\n");
+                                                
+                                                // Ensure output is displayed immediately
+                                                std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                                            },
+                                            Err(e) => {
+                                                error!("Failed to parse response: {}", e);
+                                                println!("\nReceived unparseable response from {}", client_id_clone);
+                                                println!("Raw payload: {}", payload_str);
+                                            }
                                         }
-                                    },
-                                    Err(e) => {
-                                        warn!("Failed to parse response from {}: {}", client_id, e);
                                     }
-                                }
+                                });
+                            },
+                            Err(e) => {
+                                error!("Failed to subscribe to response channel: {}", e);
                             }
-                        });
+                        }
                     },
                     Err(e) => {
                         warn!("Failed to parse client registration: {}", e);
@@ -159,10 +186,15 @@ impl Server {
                         match to_string(&cmd) {
                             Ok(json) => {
                                 println!("Executing command on {}: {}", client_id, command);
-                                let _ = nats.publish(command_subject, json.into()).await;
+                                match nats.publish(command_subject, json.into()).await {
+                                    Ok(_) => info!("Command sent successfully to {}", client_id),
+                                    Err(e) => error!("Failed to send command: {}", e)
+                                }
+                                // Give the client time to process and respond
+                                tokio::time::sleep(Duration::from_millis(100)).await;
                             },
                             Err(e) => {
-                                println!("Failed to serialize command: {}", e);
+                                error!("Failed to serialize command: {}", e);
                             }
                         }
                     },
@@ -188,10 +220,15 @@ impl Server {
                         match to_string(&cmd) {
                             Ok(json) => {
                                 println!("Requesting system info from {}", client_id);
-                                let _ = nats.publish(command_subject, json.into()).await;
+                                match nats.publish(command_subject, json.into()).await {
+                                    Ok(_) => info!("System info request sent to {}", client_id),
+                                    Err(e) => error!("Failed to send request: {}", e)
+                                }
+                                // Give the client time to process and respond
+                                tokio::time::sleep(Duration::from_millis(100)).await;
                             },
                             Err(e) => {
-                                println!("Failed to serialize command: {}", e);
+                                error!("Failed to serialize command: {}", e);
                             }
                         }
                     },
@@ -217,10 +254,15 @@ impl Server {
                         match to_string(&cmd) {
                             Ok(json) => {
                                 println!("Pinging client {}", client_id);
-                                let _ = nats.publish(command_subject, json.into()).await;
+                                match nats.publish(command_subject, json.into()).await {
+                                    Ok(_) => info!("Ping sent successfully to {}", client_id),
+                                    Err(e) => error!("Failed to send ping: {}", e)
+                                }
+                                // Give the client time to process and respond
+                                tokio::time::sleep(Duration::from_millis(100)).await;
                             },
                             Err(e) => {
-                                println!("Failed to serialize command: {}", e);
+                                error!("Failed to serialize command: {}", e);
                             }
                         }
                     },
