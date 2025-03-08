@@ -22,7 +22,7 @@ A cross-platform remote support tool built in Rust that enables secure command e
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/rs-nats.git
+git clone https://github.com/mranv/rs-nats.git
 cd rs-nats
 
 # Build the project
