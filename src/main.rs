@@ -3,9 +3,6 @@ use env_logger::Env;
 use log::info;
 use anyhow::Result;
 
-// Import the library crate
-use rs_nats_lib::{DEFAULT_NATS_URL, DEFAULT_SUBJECT_PREFIX};
-
 // Import local modules
 mod client;
 mod server;
